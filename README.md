@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="340" alt="SOA People — IP Team"></p>
+
 <h1 align="center">TW Control — one command, fully installed</h1>
 
 <p align="center">
@@ -116,6 +118,7 @@ repository — edit there, then mirror to this public repo:
 # from the private repo root
 cp control/installer/package.json control/installer/README.md <mirror>/
 cp control/installer/bin/install.mjs <mirror>/bin/
+cp control/installer/assets/logo.png <mirror>/assets/
 cd <mirror> && git commit -am "sync installer" && git push
 ```
 
