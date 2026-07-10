@@ -33,8 +33,23 @@ npx github:SOAPeople-JohanSottovia/tw-control-install
 
 That's it. The **TW Control** icon appears on your desktop and the app launches.
 
-> 🔄 **Updating** is the same command: re-running it pulls the latest version and rebuilds.
-> Every step is idempotent — the script never breaks an existing installation.
+## Already installed? The same command becomes a real installer
+
+When the script detects an existing installation (checkout, app, settings or shortcut), it
+shows what it found — including whether a **new version is available** — and offers a menu:
+
+| Choice | What it does |
+|---|---|
+| **Update** *(default)* | pulls the latest version, refreshes the required tools, re-stages the app |
+| **Repair** | removes the binaries (staged app, `node_modules`) and reinstalls them — your **settings and registered workspaces are kept**. Only allowed when you are already on the latest version. |
+| **Uninstall** | removes the app, launcher, shortcut, checkout and settings. Your cloned **workspace repositories stay on disk** (they are listed so you can remove them yourself). Asks you to type `UNINSTALL`. |
+
+Scripted equivalents: `--update`, `--repair`, `--uninstall` (with `--yes` to skip
+confirmations). Every path is idempotent — the script never breaks an existing installation.
+
+> 🔄 **You rarely need Update by hand**: TW Control checks for updates itself (at launch and
+> every 6 hours), installs them silently, and shows a banner in the app — *"Update installed —
+> restart TW Control to apply it"* — with a one-click Restart button.
 
 ## What you need
 
@@ -70,6 +85,11 @@ the app — one version mechanism, no separate auto-updater.
 ```
 npx github:SOAPeople-JohanSottovia/tw-control-install [options]
 
+--update         pull the latest version and re-stage the app (skips the menu)
+--repair         reinstall binaries, keep settings & registered workspaces (latest version only)
+--uninstall      remove app + checkout + settings; cloned workspace repos stay on disk
+--yes | -y       non-interactive: skip menus and confirmations
+
 --dir <path>     where to clone the workspace repo   (default: ~/SOAPeople/team-workspace)
 --repo <url>     repository to clone                 (default: SOAPeople/team-workspace)
 --branch <name>  branch to clone                     (default: the repo's default branch)
@@ -96,7 +116,13 @@ npx github:SOAPeople-JohanSottovia/tw-control-install [options]
 
 ## Uninstall
 
-Delete three things (no registry entries, no services):
+The built-in flow does it for you (and lists the workspace repos it deliberately keeps):
+
+```sh
+npx github:SOAPeople-JohanSottovia/tw-control-install --uninstall
+```
+
+Manual equivalent — delete three things (no registry entries, no services):
 
 | What | Windows | macOS |
 |---|---|---|

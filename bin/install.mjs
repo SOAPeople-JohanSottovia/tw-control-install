@@ -1,27 +1,29 @@
 #!/usr/bin/env node
-// TW Control — one-command bootstrap.
+// TW Control — one-command bootstrap AND lifecycle manager.
 //   npx github:SOAPeople-JohanSottovia/tw-control-install   (public mirror — the live channel)
 //   npx @soapeople/tw-control                               (npm registry — if published later)
 //
-// Zero-dependency by design. Running under npx guarantees Node + npm are present;
-// this script provides everything else, in order:
-//   1. git         — installed silently through winget on Windows; guidance on macOS/Linux
-//   2. claude CLI  — official installer script, npm -g fallback; best-effort (the console
-//                    guides the user later if it is still missing)
-//   3. the repo    — clone or fast-forward the private team-workspace checkout
-//                    (Git Credential Manager / the gh CLI handle the GitHub sign-in)
-//   4. the app     — hand over to control/install.mjs inside the checkout
-//                    (dependencies, renderer build, launcher, desktop shortcut, launch)
+// Zero-dependency by design. Running under npx guarantees Node + npm are present.
 //
-// The script is safe to re-run: it updates the checkout and re-stages the app.
+// Like a real installer, it inspects the machine first:
+//   - nothing detected           → straight install
+//   - anything already installed → menu: Update / Repair / Uninstall
+//     · Update    — fast-forward the checkout + refresh tools, re-stage the app
+//     · Repair    — wipe binaries (staged app, node_modules) and reinstall; SETTINGS AND
+//                   REGISTERED WORKSPACES ARE KEPT (userData untouched). Latest version only.
+//     · Uninstall — remove the app, launcher, shortcut, checkout and userData (settings,
+//                   secrets, workspace registrations). Cloned workspace REPOS stay on disk.
 //
-// Usage: npx @soapeople/tw-control [--dir <path>] [--repo <url>] [--branch <name>]
-//                                  [--clone-only] [--no-shortcut] [--no-launch]
+// The script is safe to re-run: every path is idempotent.
+//
+// Usage: npx … [--update|--repair|--uninstall] [--yes] [--dir <path>] [--repo <url>]
+//              [--branch <name>] [--clone-only] [--no-shortcut] [--no-launch] [--path <dir>]
 
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import readline from 'readline';
 
 const isWin = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
@@ -29,19 +31,24 @@ const HOME = os.homedir();
 
 const DEFAULT_REPO = 'https://github.com/SOAPeople/team-workspace.git';
 const DEFAULT_DIR = path.join(HOME, 'SOAPeople', 'team-workspace');
+const BRANCH = 'main';
 
 const log = (m) => process.stdout.write(`  ${m}\n`);
 const step = (m) => process.stdout.write(`\n▸ ${m}\n`);
 const fail = (m) => { process.stderr.write(`\n✖ ${m}\n`); process.exit(1); };
 
 function parseArgs(argv) {
-  const a = { dir: DEFAULT_DIR, repo: DEFAULT_REPO, branch: null, cloneOnly: false, forward: [] };
+  const a = { dir: DEFAULT_DIR, repo: DEFAULT_REPO, branch: null, cloneOnly: false, forward: [], mode: null, yes: false };
   for (let i = 0; i < argv.length; i++) {
     const x = argv[i];
     if (x === '--dir') a.dir = path.resolve(argv[++i]);
     else if (x === '--repo') a.repo = argv[++i];
     else if (x === '--branch') a.branch = argv[++i];
     else if (x === '--clone-only') a.cloneOnly = true;
+    else if (x === '--update') a.mode = 'update';
+    else if (x === '--repair') a.mode = 'repair';
+    else if (x === '--uninstall') a.mode = 'uninstall';
+    else if (x === '--yes' || x === '-y') a.yes = true;
     else if (x === '--no-shortcut' || x === '--no-launch') a.forward.push(x);
     else if (x === '--path') a.forward.push(x, argv[++i]); // app staging dir, handled by control/install.mjs
     else if (x === '--help' || x === '-h') a.help = true;
@@ -49,7 +56,79 @@ function parseArgs(argv) {
   return a;
 }
 
-// PATH lookup with Windows executable extensions.
+// ── machine inventory ───────────────────────────────────────────────────────────────────────────
+// These paths MIRROR control/install.mjs (stage/shortcut) and Electron's userData for
+// app.setName('TW Control'). Env overrides exist for tests only.
+function installPaths(a) {
+  const stage = process.env.TWCONTROL_STAGE_DIR
+    || (isWin ? path.join(process.env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local'), 'TW Control')
+      : isMac ? path.join(HOME, 'Applications', 'TW Control.app')
+        : path.join(HOME, '.local', 'share', 'tw-control'));
+  const userData = process.env.TWCONTROL_USERDATA_DIR
+    || (isWin ? path.join(process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'TW Control')
+      : isMac ? path.join(HOME, 'Library', 'Application Support', 'TW Control')
+        : path.join(HOME, '.config', 'TW Control'));
+  const desktop = process.env.TWCONTROL_DESKTOP_DIR || path.join(HOME, 'Desktop');
+  const shortcuts = isWin ? [path.join(desktop, 'TW Control.lnk')]
+    : isMac ? [path.join(desktop, 'TW Control.app'), path.join(desktop, 'TW Control.command')]
+      : [path.join(desktop, 'tw-control.desktop'), path.join(HOME, '.local', 'share', 'applications', 'tw-control.desktop')];
+  return { checkout: a.dir, stage, userData, shortcuts };
+}
+
+function detect(p) {
+  const has = (x) => { try { return fs.existsSync(x); } catch { return false; } };
+  const d = {
+    checkout: has(path.join(p.checkout, '.git')),
+    stage: has(p.stage),
+    userData: has(p.userData),
+    shortcut: p.shortcuts.some(has),
+  };
+  d.any = d.checkout || d.stage || d.userData || d.shortcut;
+  return d;
+}
+
+function gitQuiet(dir, args) {
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+// Version state of the checkout: current sha, whether origin/main is ahead, and the guards
+// (branch, dirty) that make repair unsafe on a developer machine.
+function versionState(dir) {
+  const branch = gitQuiet(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const head = gitQuiet(dir, ['rev-parse', '--short', 'HEAD']);
+  const dirty = (gitQuiet(dir, ['status', '--porcelain']) || '') !== '';
+  const fetched = gitQuiet(dir, ['fetch', '--quiet', 'origin', BRANCH]) !== null;
+  const remote = fetched ? gitQuiet(dir, ['rev-parse', '--short', `origin/${BRANCH}`]) : null;
+  return { branch, head, dirty, fetched, remote, updateAvailable: !!(remote && head && remote !== head) };
+}
+
+// ── interaction (zero-dep) ──────────────────────────────────────────────────────────────────────
+function ask(question) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (ans) => { rl.close(); resolve(ans.trim()); });
+  });
+}
+
+async function chooseAction(state, yes) {
+  const canRepair = state.checkout && state.fetched && !state.updateAvailable && !state.dirty && state.branch === BRANCH;
+  process.stdout.write('\nTW Control is already on this machine:\n');
+  log(`checkout:  ${state.checkout ? `yes (${state.head || '?'}${state.branch && state.branch !== BRANCH ? `, branch ${state.branch}` : ''}${state.dirty ? ', local changes' : ''})` : 'no'}`);
+  log(`app:       ${state.stage ? 'yes' : 'no'}    shortcut: ${state.shortcut ? 'yes' : 'no'}    settings: ${state.userData ? 'yes' : 'no'}`);
+  log(`version:   ${!state.checkout ? 'n/a' : !state.fetched ? 'could not reach GitHub' : state.updateAvailable ? `UPDATE AVAILABLE (${state.head} → ${state.remote})` : 'up to date'}`);
+  process.stdout.write('\n');
+  process.stdout.write(`  [1] Update     — ${state.updateAvailable ? 'install the new version' : 'reinstall the latest version'} (recommended)\n`);
+  process.stdout.write(`  [2] Repair     — reinstall binaries, KEEP settings & registered workspaces${canRepair ? '' : '  (needs an up-to-date, clean checkout)'}\n`);
+  process.stdout.write('  [3] Uninstall  — remove the app, checkout and settings\n');
+  process.stdout.write('  [4] Quit\n');
+  if (yes || !process.stdin.isTTY) { log('(non-interactive: Update)'); return 'update'; }
+  const ans = await ask('\nChoice [1]: ');
+  const map = { '': 'update', 1: 'update', 2: 'repair', 3: 'uninstall', 4: 'quit' };
+  return map[ans] ?? 'quit';
+}
+
+// ── prerequisite tooling ────────────────────────────────────────────────────────────────────────
 function which(cmd) {
   const exts = isWin ? ['.exe', '.cmd', '.bat'] : [''];
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
@@ -146,10 +225,86 @@ function runAppInstaller(dir, forward) {
   if ((r.status ?? 1) !== 0) fail('the TW Control installer reported an error (see the output above).');
 }
 
-function main() {
+// ── lifecycle actions ───────────────────────────────────────────────────────────────────────────
+function rmrf(target) {
+  try { fs.rmSync(target, { recursive: true, force: true }); return true; }
+  catch (e) { log(`⚠ could not remove ${target}: ${e.message}`); return false; }
+}
+
+function doInstallOrUpdate(a, fresh) {
+  ensureNode();
+  ensureGit();
+  ensureClaude();
+  cloneOrUpdate(a.repo, a.dir, a.branch);
+  if (a.cloneOnly) { process.stdout.write(`\n✅ Checkout ready at ${a.dir} (clone-only mode).\n`); return; }
+  runAppInstaller(a.dir, a.forward);
+  if (!fresh) process.stdout.write('\n✅ Update complete.\n');
+}
+
+function doRepair(a, p, state) {
+  if (!state.checkout) { log('no checkout found — running a fresh install instead.'); return doInstallOrUpdate(a, true); }
+  if (state.branch !== BRANCH || state.dirty || state.updateAvailable || !state.fetched) {
+    fail('Repair only runs on the LATEST version with a clean checkout.\n' +
+      `${state.updateAvailable ? `  An update is available (${state.head} → ${state.remote}) — run Update first.\n` : ''}` +
+      `${!state.fetched ? '  GitHub is unreachable, so the latest version cannot be verified.\n' : ''}` +
+      `${state.dirty ? '  The checkout has local changes — commit/stash/discard them first.\n' : ''}` +
+      `${state.branch !== BRANCH ? `  The checkout is on branch ${state.branch} — switch to ${BRANCH} first.\n` : ''}`);
+  }
+  step('Repairing — removing binaries (settings & registered workspaces are kept)');
+  for (const s of [p.stage, ...p.shortcuts]) if (fs.existsSync(s)) { log(`removing ${s}`); rmrf(s); }
+  for (const nm of [
+    path.join(p.checkout, 'control', 'node_modules'),
+    path.join(p.checkout, 'control', 'renderer', 'node_modules'),
+    path.join(p.checkout, 'ui', 'server', 'node_modules'),
+  ]) if (fs.existsSync(nm)) { log(`removing ${nm}`); rmrf(nm); }
+  runAppInstaller(p.checkout, a.forward);
+  process.stdout.write('\n✅ Repair complete — settings and registered workspaces were preserved.\n');
+}
+
+async function doUninstall(a, p, yes) {
+  step('Uninstall — this removes:');
+  log(`app:        ${p.stage}`);
+  for (const s of p.shortcuts) log(`shortcut:   ${s}`);
+  log(`settings:   ${p.userData}  (config, secrets, workspace registrations)`);
+  log(`checkout:   ${p.checkout}`);
+  // The registry knows the cloned workspace repos — they are the user's WORK, never deleted.
+  const workspaces = [];
+  try {
+    const reg = JSON.parse(fs.readFileSync(path.join(p.userData, 'registry.json'), 'utf8'));
+    const repos = Array.isArray(reg) ? reg : reg.repos || reg.workspaces || [];
+    for (const r of repos) for (const t of r.trees || [r]) if (t && t.path) workspaces.push(t.path);
+  } catch { /* no registry */ }
+  if (workspaces.length) {
+    process.stdout.write('\n  Your cloned workspace repositories stay on disk (remove them yourself if wanted):\n');
+    for (const w of [...new Set(workspaces)]) log(`• ${w}`);
+  }
+  if (!yes) {
+    if (!process.stdin.isTTY) fail('uninstall needs --yes when not run interactively.');
+    const ans = await ask('\nType UNINSTALL to confirm: ');
+    if (ans !== 'UNINSTALL') { log('aborted — nothing was removed.'); return; }
+  }
+  step('Removing');
+  let okAll = true;
+  for (const t of [p.stage, ...p.shortcuts, p.userData, p.checkout]) {
+    if (!fs.existsSync(t)) continue;
+    log(`removing ${t}`);
+    okAll = rmrf(t) && okAll;
+  }
+  if (!okAll && isWin) log('⚠ some files were locked — close TW Control and re-run uninstall.');
+  process.stdout.write(okAll ? '\n✅ TW Control was uninstalled.\n' : '\n⚠ Uninstall finished with warnings (see above).\n');
+}
+
+// ── entry ───────────────────────────────────────────────────────────────────────────────────────
+async function main() {
   const a = parseArgs(process.argv.slice(2));
   if (a.help) {
-    process.stdout.write('TW Control bootstrap — options:\n' +
+    process.stdout.write('TW Control bootstrap — lifecycle:\n' +
+      '  (no flag)       detect: fresh machine → install; existing → interactive menu\n' +
+      '  --update        pull the latest version and re-stage the app\n' +
+      '  --repair        reinstall binaries, keep settings & registered workspaces (latest version only)\n' +
+      '  --uninstall     remove app + checkout + settings (cloned workspace repos stay); asks to type UNINSTALL\n' +
+      '  --yes | -y      skip confirmations / menus (non-interactive)\n' +
+      'install options:\n' +
       '  --dir <path>    where to clone the workspace repo (default: ~/SOAPeople/team-workspace)\n' +
       '  --repo <url>    repository to clone (default: SOAPeople/team-workspace)\n' +
       '  --branch <name> branch to clone (default: the repository default branch)\n' +
@@ -160,12 +315,18 @@ function main() {
     return;
   }
   process.stdout.write('\n╺╸ TW Control — guided install ╺╸\n');
-  ensureNode();
-  ensureGit();
-  ensureClaude();
-  cloneOrUpdate(a.repo, a.dir, a.branch);
-  if (a.cloneOnly) { process.stdout.write(`\n✅ Checkout ready at ${a.dir} (clone-only mode).\n`); return; }
-  runAppInstaller(a.dir, a.forward);
+
+  const p = installPaths(a);
+  const found = detect(p);
+  const state = { ...found, ...(found.checkout ? versionState(p.checkout) : { branch: null, head: null, dirty: false, fetched: false, remote: null, updateAvailable: false }) };
+
+  let mode = a.mode;
+  if (!mode) mode = found.any ? await chooseAction(state, a.yes) : 'install';
+
+  if (mode === 'quit') { log('nothing changed.'); return; }
+  if (mode === 'install' || mode === 'update') return doInstallOrUpdate(a, mode === 'install');
+  if (mode === 'repair') return doRepair(a, p, state);
+  if (mode === 'uninstall') return doUninstall(a, p, a.yes);
 }
 
 main();
