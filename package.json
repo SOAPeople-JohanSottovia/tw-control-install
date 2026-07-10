@@ -1,0 +1,25 @@
+{
+  "name": "@soapeople/tw-control",
+  "version": "0.1.0",
+  "description": "One-command installer for TW Control — the SOA People team-workspace desktop console. Installs prerequisites, clones the workspace repo, builds and installs the app.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "bin": {
+    "tw-control": "bin/install.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/SOAPeople-JohanSottovia/tw-control-install",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SOAPeople-JohanSottovia/tw-control-install.git"
+  }
+}
