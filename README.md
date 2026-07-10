@@ -44,8 +44,10 @@ That's it. The **TW Control** icon appears on your desktop and the app launches.
 | A GitHub account **with access to the private `SOAPeople/team-workspace` repo** | it's the app's source — ask the AI Architect for an invitation |
 | Windows 10/11 or macOS 11+ | the two supported desktops |
 
-No compiler, no Visual Studio Build Tools, no Xcode: the only native module (`node-pty`)
-ships prebuilt binaries for `win32-x64`, `win32-arm64`, `darwin-x64` and `darwin-arm64`.
+No compiler, no Visual Studio Build Tools, no Xcode, no front-end toolchain: the only native
+module (`node-pty`) ships prebuilt binaries for `win32-x64`, `win32-arm64`, `darwin-x64` and
+`darwin-arm64`, and the app's UI ships **prebuilt** inside the checkout — any Node LTS from
+18 up works (the Angular CLI's stricter Node requirement applies to developers only).
 
 ## What the command actually does
 
@@ -58,7 +60,7 @@ each one as it goes:
 | 2 | **git** | installed silently via `winget install Git.Git` if missing (a Windows confirmation may appear) | guidance if missing (`xcode-select --install`) |
 | 3 | **Claude CLI** | official installer (`irm https://claude.ai/install.ps1`), `npm -g` fallback; *best-effort* — the app guides you later if still missing | official installer (`curl https://claude.ai/install.sh`), same fallback |
 | 4 | **GitHub sign-in + checkout** | `git clone` of the private repo into `~/SOAPeople/team-workspace` — Git Credential Manager (ships with Git for Windows) opens the browser sign-in; `gh` CLI as fallback. Already cloned? `git pull --ff-only` instead. | same; the `gh` CLI device flow is the smoothest sign-in |
-| 5 | **Build & install the app** | hands over to `control/install.mjs` inside the checkout: installs the app dependencies (Electron, the Angular renderer, the embedded server's `express` + `node-pty`), builds the renderer, stages a launcher in `%LOCALAPPDATA%\TW Control`, puts a shortcut on the desktop, launches | same, staged as a real `TW Control.app` bundle in `~/Applications` |
+| 5 | **Install the app** | hands over to `control/install.mjs` inside the checkout: installs the app dependencies (Electron + the embedded server's `express` and `node-pty`), uses the **prebuilt** UI shipped in the checkout (no Angular build on your machine), stages a launcher in `%LOCALAPPDATA%\TW Control`, puts a shortcut on the desktop, launches | same, staged as a real `TW Control.app` bundle in `~/Applications` |
 
 The app deliberately lives **inside the git checkout**: updating the checkout *is* updating
 the app — one version mechanism, no separate auto-updater.
