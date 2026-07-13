@@ -376,6 +376,14 @@ async function doUninstall(a, p, yes) {
   for (const s of p.shortcuts) log(`shortcut:   ${s}`);
   log(`settings:   ${p.userData}  (config, secrets, workspace registrations)`);
   log(`checkout:   ${p.checkout}`);
+  // The DEFAULT checkout location can hold an older install when the app was later (re)installed with a
+  // custom --dir — sweep it too (Windows and macOS alike) instead of leaving a stray
+  // ~/SOAPeople/team-workspace behind.
+  const checkouts = [p.checkout];
+  if (fs.existsSync(DEFAULT_DIR) && path.resolve(DEFAULT_DIR) !== path.resolve(p.checkout)) {
+    checkouts.push(DEFAULT_DIR);
+    log(`checkout:   ${DEFAULT_DIR}  (default location — older install)`);
+  }
   // The registry knows the cloned workspace repos — they are the user's WORK. registry.json stores
   // { repos: { "owner/repo": { localPath, trees: { main: { path } } } } } — BOTH repos and trees are
   // OBJECTS, so enumerate with Object.values (a for..of over an object throws → the list would silently
@@ -430,7 +438,7 @@ async function doUninstall(a, p, yes) {
   }
   step('Removing');
   let okAll = true;
-  const targets = [p.stage, ...p.shortcuts, p.userData, p.checkout, ...toDelete];
+  const targets = [p.stage, ...p.shortcuts, p.userData, ...checkouts, ...toDelete];
   for (const t of targets) {
     if (!fs.existsSync(t)) continue;
     log(`removing ${t}`);
