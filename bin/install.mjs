@@ -49,6 +49,8 @@ function parseArgs(argv) {
     else if (x === '--repair') a.mode = 'repair';
     else if (x === '--uninstall') a.mode = 'uninstall';
     else if (x === '--yes' || x === '-y') a.yes = true;
+    else if (x === '--purge-workspaces') a.purgeWorkspaces = true;
+    else if (x === '--keep-workspaces') a.keepWorkspaces = true;
     else if (x === '--no-shortcut' || x === '--no-launch') a.forward.push(x);
     else if (x === '--path') a.forward.push(x, argv[++i]); // app staging dir, handled by control/install.mjs
     else if (x === '--help' || x === '-h') a.help = true;
@@ -109,6 +111,16 @@ function ask(question) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.question(question, (ans) => { rl.close(); resolve(ans.trim()); });
   });
+}
+
+// Windows: npm / claude are .cmd shims Node can only launch through a shell (CVE-2024-27980); an args
+// ARRAY together with shell:true is deprecated (DEP0190, unescaped concatenation). Pass the whole command
+// as ONE string on Windows (every caller passes static flags — nothing to quote), a plain args array
+// elsewhere. Extra options (encoding/stdio) pass through unchanged.
+function shellSync(cmd, args, opts = {}) {
+  return isWin
+    ? spawnSync(`${cmd} ${args.join(' ')}`, { ...opts, shell: true })
+    : spawnSync(cmd, args, opts);
 }
 
 async function chooseAction(state, yes) {
@@ -202,12 +214,12 @@ function ensureNpm() {
   if (!which('npm')) fail('npm was not found next to Node. Reinstall Node.js LTS from https://nodejs.org (it bundles npm), then re-run this command.');
   // A recent Node bundles a recent npm, but a stale global npm can shadow it and choke on Angular 22's
   // lockfile/peer resolution — so verify and bump if it is behind.
-  const r = spawnSync('npm', ['--version'], { encoding: 'utf8', shell: isWin });
+  const r = shellSync('npm', ['--version'], { encoding: 'utf8' });
   const v = r.status === 0 ? parseSemver(r.stdout) : null;
   if (v && cmpSemver(v, [10, 0, 0]) < 0) {
     step(`npm ${v.join('.')} is old — updating to the latest (Angular 22 workspaces need a modern npm)`);
-    spawnSync('npm', ['install', '-g', 'npm@latest'], { stdio: 'inherit', shell: isWin });
-    const r2 = spawnSync('npm', ['--version'], { encoding: 'utf8', shell: isWin });
+    shellSync('npm', ['install', '-g', 'npm@latest'], { stdio: 'inherit' });
+    const r2 = shellSync('npm', ['--version'], { encoding: 'utf8' });
     log(`npm: ${(r2.stdout || '').trim() || 'updated'}`);
   } else {
     log(v ? `npm ${v.join('.')}: OK` : 'npm: found');
@@ -238,7 +250,7 @@ function ensureGit() {
 // install warns rather than aborting the whole setup.
 const MIN_CLAUDE = [2, 0, 0]; // keep users on a recent Claude Code CLI (its output is parsed by the console)
 function claudeSemver() {
-  const r = spawnSync('claude', ['--version'], { encoding: 'utf8', shell: isWin });
+  const r = shellSync('claude', ['--version'], { encoding: 'utf8' });
   return r.status === 0 ? parseSemver(r.stdout) : null;
 }
 function installClaude() {
@@ -250,7 +262,7 @@ function installClaude() {
   prependPath(path.join(HOME, '.local', 'bin')); // where the official installer puts it
   if (which('claude')) return;
   log('official installer unavailable — falling back to npm…');
-  spawnSync('npm', ['install', '-g', '@anthropic-ai/claude-code'], { stdio: 'inherit', shell: isWin });
+  shellSync('npm', ['install', '-g', '@anthropic-ai/claude-code'], { stdio: 'inherit' });
   prependPath(path.join(HOME, '.npm-global', 'bin'));
 }
 function ensureClaude() {
@@ -265,7 +277,7 @@ function ensureClaude() {
   if (!v) { log('claude CLI: found (version unreadable)'); return; }
   if (cmpSemver(v, MIN_CLAUDE) < 0) {
     step(`claude CLI ${v.join('.')} is older than the required ${MIN_CLAUDE.join('.')} — updating to the latest`);
-    spawnSync('npm', ['install', '-g', '@anthropic-ai/claude-code@latest'], { stdio: 'inherit', shell: isWin });
+    shellSync('npm', ['install', '-g', '@anthropic-ai/claude-code@latest'], { stdio: 'inherit' });
     prependPath(path.join(HOME, '.npm-global', 'bin'));
     const v2 = claudeSemver();
     log(v2 ? `claude CLI: ${v2.join('.')}` : '⚠ claude update did not complete — TW Control will guide you when it needs it.');
@@ -364,17 +376,43 @@ async function doUninstall(a, p, yes) {
   for (const s of p.shortcuts) log(`shortcut:   ${s}`);
   log(`settings:   ${p.userData}  (config, secrets, workspace registrations)`);
   log(`checkout:   ${p.checkout}`);
-  // The registry knows the cloned workspace repos — they are the user's WORK, never deleted.
+  // The registry knows the cloned workspace repos — they are the user's WORK. registry.json stores
+  // { repos: { "owner/repo": { localPath, trees: { main: { path } } } } } — BOTH repos and trees are
+  // OBJECTS, so enumerate with Object.values (a for..of over an object throws → the list would silently
+  // come up empty, as it did before).
   const workspaces = [];
   try {
     const reg = JSON.parse(fs.readFileSync(path.join(p.userData, 'registry.json'), 'utf8'));
-    const repos = Array.isArray(reg) ? reg : reg.repos || reg.workspaces || [];
-    for (const r of repos) for (const t of r.trees || [r]) if (t && t.path) workspaces.push(t.path);
+    const repos = Array.isArray(reg) ? reg : Object.values(reg.repos || reg.workspaces || {});
+    for (const r of repos) {
+      if (r && r.localPath) workspaces.push(r.localPath);
+      const trees = r && r.trees ? (Array.isArray(r.trees) ? r.trees : Object.values(r.trees)) : [];
+      for (const t of trees) if (t && t.path) workspaces.push(t.path);
+    }
   } catch { /* no registry */ }
-  if (workspaces.length) {
-    process.stdout.write('\n  Your cloned workspace repositories stay on disk (remove them yourself if wanted):\n');
-    for (const w of [...new Set(workspaces)]) log(`• ${w}`);
+  const wsList = [...new Set(workspaces)];
+
+  // Decide the fate of the cloned workspace repos. Default is KEEP (they can hold uncommitted work) —
+  // deleting them takes an EXPLICIT choice: --purge-workspaces non-interactively, or typing DELETE at the
+  // prompt. --keep-workspaces forces keep and skips the question.
+  let purge = false;
+  if (wsList.length) {
+    if (a && a.purgeWorkspaces) purge = true;
+    else if (a && a.keepWorkspaces) purge = false;
+    else if (process.stdin.isTTY && !yes) {
+      process.stdout.write('\n  Cloned workspace repositories found:\n');
+      for (const w of wsList) log(`• ${w}`);
+      const ans = await ask(`\nAlso DELETE these ${wsList.length} workspace folder(s) and their local changes? Type DELETE to remove, or press Enter to keep: `);
+      purge = ans === 'DELETE';
+    }
+    if (!purge) {
+      process.stdout.write('\n  Your cloned workspace repositories stay on disk (remove them yourself if wanted):\n');
+      for (const w of wsList) log(`• ${w}`);
+    } else {
+      process.stdout.write(`\n  ⚠ Will also delete ${wsList.length} workspace folder(s) — any uncommitted work there is lost.\n`);
+    }
   }
+
   if (!yes) {
     if (!process.stdin.isTTY) fail('uninstall needs --yes when not run interactively.');
     const ans = await ask('\nType UNINSTALL to confirm: ');
@@ -382,13 +420,16 @@ async function doUninstall(a, p, yes) {
   }
   step('Removing');
   let okAll = true;
-  for (const t of [p.stage, ...p.shortcuts, p.userData, p.checkout]) {
+  const targets = [p.stage, ...p.shortcuts, p.userData, p.checkout, ...(purge ? wsList : [])];
+  for (const t of targets) {
     if (!fs.existsSync(t)) continue;
     log(`removing ${t}`);
     okAll = rmrf(t) && okAll;
   }
   if (!okAll && isWin) log('⚠ some files were locked — close TW Control and re-run uninstall.');
-  process.stdout.write(okAll ? '\n✅ TW Control was uninstalled.\n' : '\n⚠ Uninstall finished with warnings (see above).\n');
+  process.stdout.write(okAll
+    ? `\n✅ TW Control was uninstalled${purge ? ' (workspaces removed)' : ' (workspaces kept)'}.\n`
+    : '\n⚠ Uninstall finished with warnings (see above).\n');
 }
 
 // ── entry ───────────────────────────────────────────────────────────────────────────────────────
@@ -399,7 +440,10 @@ async function main() {
       '  (no flag)       detect: fresh machine → install; existing → interactive menu\n' +
       '  --update        pull the latest version and re-stage the app\n' +
       '  --repair        reinstall binaries, keep settings & registered workspaces (latest version only)\n' +
-      '  --uninstall     remove app + checkout + settings (cloned workspace repos stay); asks to type UNINSTALL\n' +
+      '  --uninstall     remove app + checkout + settings; asks to type UNINSTALL. Cloned workspace repos are\n' +
+      '                  KEPT by default — you are asked whether to delete them (or use the flags below)\n' +
+      '  --purge-workspaces  on uninstall, also delete the cloned workspace folders (destroys local work)\n' +
+      '  --keep-workspaces   on uninstall, keep the cloned workspace folders without asking\n' +
       '  --yes | -y      skip confirmations / menus (non-interactive)\n' +
       'install options:\n' +
       '  --dir <path>    where to clone the workspace repo (default: ~/SOAPeople/team-workspace)\n' +
