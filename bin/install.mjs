@@ -392,24 +392,34 @@ async function doUninstall(a, p, yes) {
   } catch { /* no registry */ }
   const wsList = [...new Set(workspaces)];
 
-  // Decide the fate of the cloned workspace repos. Default is KEEP (they can hold uncommitted work) —
-  // deleting them takes an EXPLICIT choice: --purge-workspaces non-interactively, or typing DELETE at the
-  // prompt. --keep-workspaces forces keep and skips the question.
-  let purge = false;
+  // Decide the fate of the cloned workspace repos — folder by folder, not all-or-nothing:
+  //   --keep-workspaces   keep every folder, no question
+  //   --purge-workspaces  delete every folder, no question
+  //   --yes               fully unattended = delete them ALL (no selection round — by design)
+  //   interactive         numbered selection: pick some (e.g. "1,3"), ALL, or Enter to keep everything
+  let toDelete = [];
   if (wsList.length) {
-    if (a && a.purgeWorkspaces) purge = true;
-    else if (a && a.keepWorkspaces) purge = false;
-    else if (process.stdin.isTTY && !yes) {
-      process.stdout.write('\n  Cloned workspace repositories found:\n');
-      for (const w of wsList) log(`• ${w}`);
-      const ans = await ask(`\nAlso DELETE these ${wsList.length} workspace folder(s) and their local changes? Type DELETE to remove, or press Enter to keep: `);
-      purge = ans === 'DELETE';
+    if (a && a.keepWorkspaces) toDelete = [];
+    else if (a && a.purgeWorkspaces) toDelete = wsList;
+    else if (yes) toDelete = wsList;
+    else if (process.stdin.isTTY) {
+      process.stdout.write('\n  Registered workspace repositories found:\n');
+      wsList.forEach((w, i) => log(`[${i + 1}] ${w}`));
+      const ans = (await ask(`\nDelete workspace folders (local changes are lost)? Enter numbers (e.g. 1,3), ALL for all ${wsList.length}, or press Enter to keep them all: `)).trim();
+      if (/^all$/i.test(ans)) toDelete = wsList;
+      else if (ans) {
+        const picked = new Set(ans.split(/[\s,;]+/).map((n) => parseInt(n, 10)).filter((n) => n >= 1 && n <= wsList.length));
+        toDelete = wsList.filter((_, i) => picked.has(i + 1));
+      }
     }
-    if (!purge) {
-      process.stdout.write('\n  Your cloned workspace repositories stay on disk (remove them yourself if wanted):\n');
-      for (const w of wsList) log(`• ${w}`);
-    } else {
-      process.stdout.write(`\n  ⚠ Will also delete ${wsList.length} workspace folder(s) — any uncommitted work there is lost.\n`);
+    const kept = wsList.filter((w) => !toDelete.includes(w));
+    if (toDelete.length) {
+      process.stdout.write(`\n  ⚠ Will also delete ${toDelete.length}/${wsList.length} workspace folder(s) — any uncommitted work there is lost:\n`);
+      for (const w of toDelete) log(`• ${w}`);
+    }
+    if (kept.length) {
+      process.stdout.write('\n  These workspace repositories stay on disk (remove them yourself if wanted):\n');
+      for (const w of kept) log(`• ${w}`);
     }
   }
 
@@ -420,7 +430,7 @@ async function doUninstall(a, p, yes) {
   }
   step('Removing');
   let okAll = true;
-  const targets = [p.stage, ...p.shortcuts, p.userData, p.checkout, ...(purge ? wsList : [])];
+  const targets = [p.stage, ...p.shortcuts, p.userData, p.checkout, ...toDelete];
   for (const t of targets) {
     if (!fs.existsSync(t)) continue;
     log(`removing ${t}`);
@@ -428,7 +438,7 @@ async function doUninstall(a, p, yes) {
   }
   if (!okAll && isWin) log('⚠ some files were locked — close TW Control and re-run uninstall.');
   process.stdout.write(okAll
-    ? `\n✅ TW Control was uninstalled${purge ? ' (workspaces removed)' : ' (workspaces kept)'}.\n`
+    ? `\n✅ TW Control was uninstalled${wsList.length ? ` (${toDelete.length}/${wsList.length} workspace folder(s) removed)` : ''}.\n`
     : '\n⚠ Uninstall finished with warnings (see above).\n');
 }
 
@@ -440,11 +450,12 @@ async function main() {
       '  (no flag)       detect: fresh machine → install; existing → interactive menu\n' +
       '  --update        pull the latest version and re-stage the app\n' +
       '  --repair        reinstall binaries, keep settings & registered workspaces (latest version only)\n' +
-      '  --uninstall     remove app + checkout + settings; asks to type UNINSTALL. Cloned workspace repos are\n' +
-      '                  KEPT by default — you are asked whether to delete them (or use the flags below)\n' +
-      '  --purge-workspaces  on uninstall, also delete the cloned workspace folders (destroys local work)\n' +
-      '  --keep-workspaces   on uninstall, keep the cloned workspace folders without asking\n' +
-      '  --yes | -y      skip confirmations / menus (non-interactive)\n' +
+      '  --uninstall     remove app + checkout + settings; asks to type UNINSTALL. You then pick WHICH\n' +
+      '                  registered workspace folders to delete (numbers, ALL, or Enter to keep them)\n' +
+      '  --purge-workspaces  on uninstall, delete ALL the workspace folders (destroys local work)\n' +
+      '  --keep-workspaces   on uninstall, keep every workspace folder without asking\n' +
+      '  --yes | -y      skip confirmations / menus (non-interactive). On uninstall this DELETES ALL the\n' +
+      '                  registered workspace folders too — pass --keep-workspaces to keep them\n' +
       'install options:\n' +
       '  --dir <path>    where to clone the workspace repo (default: ~/SOAPeople/team-workspace)\n' +
       '  --repo <url>    repository to clone (default: SOAPeople/team-workspace)\n' +
