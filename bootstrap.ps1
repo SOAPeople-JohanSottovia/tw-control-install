@@ -38,24 +38,35 @@ Note 'Verifying prerequisites (Node.js, git) and installing whatever is missing.
 
 $haveWinget = Have 'winget'
 
-# 1) Node.js LTS — provides node + npm + npx (the engine for everything that follows).
-if (Have 'node') {
+# 1) Node.js — provides node + npm + npx (the engine for everything that follows). The installer
+#    (install.mjs) enforces the EXACT floor (^22.22.3 || ^24.15.0 || >=26 — Electron 43 + Angular 22
+#    workspaces); here a coarse major check installs/upgrades an obviously-too-old Node in one shot.
+function Node-Major {
+  try {
+    $v = node -v 2>$null
+    if ($v -match 'v(\d+)') { return [int]$Matches[1] }
+  } catch {}
+  return 0
+}
+$nodeOk = (Have 'node') -and ((Node-Major) -ge 22)
+if ($nodeOk) {
   Info "Node.js $(node -v): found"
 } else {
-  Step 'Installing Node.js LTS (one-time)'
+  if (Have 'node') { Info "Node.js $(node -v) is too old (need 22.22.3+) — installing a newer LTS" }
+  Step 'Installing/upgrading Node.js LTS (one-time)'
   if (-not $haveWinget) {
-    Die ("Node.js is missing and winget is unavailable on this machine.`n" +
+    Die ("A supported Node.js (22.22.3+) is required and winget is unavailable on this machine.`n" +
          "  Install Node.js LTS from https://nodejs.org (the standard next -> next -> finish`n" +
          "  installer), close this window, then re-run this command.")
   }
   winget install --id OpenJS.NodeJS.LTS -e --source winget `
     --accept-package-agreements --accept-source-agreements --silent
   Refresh-Path "$env:ProgramFiles\nodejs"
-  if (-not (Have 'node')) {
-    Die ("Node.js installation did not complete.`n" +
+  if (-not ((Have 'node') -and ((Node-Major) -ge 22))) {
+    Die ("Node.js 22.22.3+ is required.`n" +
          "  Install it from https://nodejs.org, close this window, then re-run this command.")
   }
-  Info "Node.js $(node -v): installed"
+  Info "Node.js $(node -v): ready"
 }
 
 # 2) git — the tool the failing machine lacked. npx needs it to fetch the installer package, and

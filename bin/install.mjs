@@ -165,17 +165,53 @@ function refreshWindowsPath() {
   if (expanded) process.env.PATH = expanded;
 }
 
+// Zero-dep semver: "1.2.3" → [1,2,3]; compare two triples.
+function parseSemver(s) { const m = String(s).match(/(\d+)\.(\d+)\.(\d+)/); return m ? [+m[1], +m[2], +m[3]] : null; }
+function cmpSemver(a, b) { for (let i = 0; i < 3; i++) { const d = (a[i] || 0) - (b[i] || 0); if (d) return d; } return 0; }
+
+// The Node floor is the toolchain's REAL requirement, not a guess:
+//   Electron 43 (bundled with every install) → Node >= 22.12
+//   Angular 22 WORKSPACES scaffolded through the console → ^22.22.3 || ^24.15.0 || >=26
+// The strictest wins, so we enforce Angular's line exactly (odd/non-LTS 23/25 are excluded, as Angular does).
+const NODE_FLOOR_LABEL = 'Node 22.22.3+ (or 24.15+, or 26+)';
+function nodeSatisfies() {
+  const [maj, min = 0, pat = 0] = process.versions.node.split('.').map(Number);
+  if (maj >= 26) return true;
+  if (maj === 24) return min >= 15;                       // ^24.15.0
+  if (maj === 22) return min > 22 || (min === 22 && pat >= 3); // ^22.22.3
+  return false;
+}
 function ensureNode() {
-  const major = Number(process.versions.node.split('.')[0]);
-  if (major < 18) fail(`Node ${process.versions.node} is too old. Install the LTS from https://nodejs.org (18 or newer), then re-run this command.`);
-  log(`Node ${process.versions.node}: OK`);
+  if (nodeSatisfies()) { log(`Node ${process.versions.node}: OK`); return; }
+  step(`Your Node.js (${process.versions.node}) is too old for TW Control`);
+  log(`TW Control (Electron 43) and its Angular 22 workspaces need ${NODE_FLOOR_LABEL}.`);
+  if (isWin && which('winget')) {
+    log('Installing Node.js LTS via winget (a Windows confirmation may appear)…');
+    spawnSync('winget', ['install', '--id', 'OpenJS.NodeJS.LTS', '-e', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--silent'], { stdio: 'inherit' });
+    fail('Node.js LTS was installed, but THIS window is still running the old Node.\n  Close it, open a NEW terminal, and re-run the install command.');
+  }
+  fail('Install the latest Node.js LTS, then re-run this command:\n' +
+    '  macOS:    https://nodejs.org   (or: brew install node)\n' +
+    '  Windows:  https://nodejs.org   (or: winget install OpenJS.NodeJS.LTS)\n' +
+    '  Linux:    use nvm or your distro package — it must provide Node 22.22.3 or newer.');
 }
 
 // npm ships inside Node, but verify it explicitly so a broken PATH surfaces here with clear
 // guidance rather than as an opaque failure deep inside the app build.
 function ensureNpm() {
-  if (which('npm')) { log('npm: found'); return; }
-  fail('npm was not found next to Node. Reinstall Node.js LTS from https://nodejs.org (it bundles npm), then re-run this command.');
+  if (!which('npm')) fail('npm was not found next to Node. Reinstall Node.js LTS from https://nodejs.org (it bundles npm), then re-run this command.');
+  // A recent Node bundles a recent npm, but a stale global npm can shadow it and choke on Angular 22's
+  // lockfile/peer resolution — so verify and bump if it is behind.
+  const r = spawnSync('npm', ['--version'], { encoding: 'utf8', shell: isWin });
+  const v = r.status === 0 ? parseSemver(r.stdout) : null;
+  if (v && cmpSemver(v, [10, 0, 0]) < 0) {
+    step(`npm ${v.join('.')} is old — updating to the latest (Angular 22 workspaces need a modern npm)`);
+    spawnSync('npm', ['install', '-g', 'npm@latest'], { stdio: 'inherit', shell: isWin });
+    const r2 = spawnSync('npm', ['--version'], { encoding: 'utf8', shell: isWin });
+    log(`npm: ${(r2.stdout || '').trim() || 'updated'}`);
+  } else {
+    log(v ? `npm ${v.join('.')}: OK` : 'npm: found');
+  }
 }
 
 function ensureGit() {
@@ -195,23 +231,47 @@ function ensureGit() {
   fail('git is missing. Install it with your package manager (e.g. `sudo apt install git`), then re-run this command.');
 }
 
-// Best-effort: the console needs `claude` for the plugin preflight and the terminal tabs,
-// but the app itself installs and launches fine without it — so warn instead of failing.
-function ensureClaude() {
-  if (which('claude')) { log('claude CLI: found'); return; }
+// The console DRIVES `claude` for real work: it installs the team-workspace plugin into each workspace,
+// runs the plugin preflight, hosts the terminal tabs, and powers the second-brain AI search. A missing or
+// stale CLI is exactly what silently breaks Plugin Studio, ticket sync and the second brain — so we install
+// it if absent AND keep it recent. The app still launches without it (it then guides the user), so a failed
+// install warns rather than aborting the whole setup.
+const MIN_CLAUDE = [2, 0, 0]; // keep users on a recent Claude Code CLI (its output is parsed by the console)
+function claudeSemver() {
+  const r = spawnSync('claude', ['--version'], { encoding: 'utf8', shell: isWin });
+  return r.status === 0 ? parseSemver(r.stdout) : null;
+}
+function installClaude() {
   step('Installing the Claude CLI');
   try {
-    if (isWin) {
-      spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://claude.ai/install.ps1 | iex'], { stdio: 'inherit' });
-    } else {
-      spawnSync('bash', ['-c', 'curl -fsSL https://claude.ai/install.sh | bash'], { stdio: 'inherit' });
-    }
-  } catch { /* fall through */ }
+    if (isWin) spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://claude.ai/install.ps1 | iex'], { stdio: 'inherit' });
+    else spawnSync('bash', ['-c', 'curl -fsSL https://claude.ai/install.sh | bash'], { stdio: 'inherit' });
+  } catch { /* fall through to npm */ }
   prependPath(path.join(HOME, '.local', 'bin')); // where the official installer puts it
   if (which('claude')) return;
   log('official installer unavailable — falling back to npm…');
   spawnSync('npm', ['install', '-g', '@anthropic-ai/claude-code'], { stdio: 'inherit', shell: isWin });
-  if (!which('claude')) log('⚠ claude CLI still missing — TW Control will guide you when it needs it.');
+  prependPath(path.join(HOME, '.npm-global', 'bin'));
+}
+function ensureClaude() {
+  if (!which('claude')) {
+    installClaude();
+    if (!which('claude')) {
+      log('⚠ claude CLI still missing — TW Control needs it for Plugin Studio, ticket sync and the second brain, and will guide you when it does.');
+      return;
+    }
+  }
+  const v = claudeSemver();
+  if (!v) { log('claude CLI: found (version unreadable)'); return; }
+  if (cmpSemver(v, MIN_CLAUDE) < 0) {
+    step(`claude CLI ${v.join('.')} is older than the required ${MIN_CLAUDE.join('.')} — updating to the latest`);
+    spawnSync('npm', ['install', '-g', '@anthropic-ai/claude-code@latest'], { stdio: 'inherit', shell: isWin });
+    prependPath(path.join(HOME, '.npm-global', 'bin'));
+    const v2 = claudeSemver();
+    log(v2 ? `claude CLI: ${v2.join('.')}` : '⚠ claude update did not complete — TW Control will guide you when it needs it.');
+  } else {
+    log(`claude CLI ${v.join('.')}: OK`);
+  }
 }
 
 function cloneOrUpdate(repo, dir, branch) {
@@ -262,8 +322,8 @@ function rmrf(target) {
 // note the tools handled downstream so the user sees the full picture in one place.
 function preflight() {
   step('Checking prerequisites');
-  ensureNode();                 // node runtime (≥18)
-  ensureNpm();                  // npm (bundled with Node) — used for every dependency install
+  ensureNode();                 // node runtime — Electron 43 + Angular 22 workspaces: ^22.22.3 || ^24.15.0 || >=26
+  ensureNpm();                  // npm (bundled with Node) — bumped if stale; Angular 22 needs a modern npm
   ensureGit();                  // git — auto via winget on Windows, guidance elsewhere
   ensureClaude();               // Claude CLI — best-effort; the app guides the user if still absent
   log('Electron runtime + node-pty: handled by the app installer (auto-downloaded / prebuilt — no compiler needed).');
