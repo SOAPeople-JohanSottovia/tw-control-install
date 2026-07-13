@@ -10,6 +10,8 @@
   "files": [
     "bin",
     "assets",
+    "bootstrap.ps1",
+    "bootstrap.sh",
     "README.md"
   ],
   "engines": {

@@ -20,18 +20,31 @@ logic — only the guided-install script. The application itself lives in the pr
 
 ## Install
 
-**1.** Install **Node.js LTS** from <https://nodejs.org> — the standard "next → next → finish"
-installer. This is the *only* manual prerequisite.
+Open a terminal and paste **one line**. It checks the machine, installs anything missing
+(Node.js and Git included), then installs and launches TW Control.
 
-**2.** Open a terminal — **PowerShell** on Windows, **Terminal** on macOS — and paste:
+**Windows** — open **PowerShell** and paste:
 
-```sh
-npx github:SOAPeople-JohanSottovia/tw-control-install
+```powershell
+irm https://raw.githubusercontent.com/SOAPeople-JohanSottovia/tw-control-install/main/bootstrap.ps1 | iex
 ```
 
-**3.** When a browser window opens, **sign in to GitHub** (first run only).
+**macOS / Linux** — open **Terminal** and paste:
 
-That's it. The **TW Control** icon appears on your desktop and the app launches.
+```sh
+curl -fsSL https://raw.githubusercontent.com/SOAPeople-JohanSottovia/tw-control-install/main/bootstrap.sh | bash
+```
+
+When a browser window opens, **sign in to GitHub** (first run only). That's it — the
+**TW Control** icon appears on your desktop and the app launches.
+
+> **Already have Node.js *and* Git?** You can skip the bootstrap and run the installer directly:
+> ```sh
+> npx github:SOAPeople-JohanSottovia/tw-control-install
+> ```
+> Use the one-liners above on a **fresh machine** — `npx github:…` asks npm to `git clone` the
+> installer, so it fails with `spawn git ENOENT` when Git is not installed yet. The bootstrap
+> installs Git first, so it works from a clean Windows/macOS install.
 
 ## Already installed? The same command becomes a real installer
 
@@ -55,9 +68,19 @@ confirmations). Every path is idempotent — the script never breaks an existing
 
 | Requirement | Why |
 |---|---|
-| Node.js LTS (≥ 18) | runs the installer, the app runtime and the embedded servers |
 | A GitHub account **with access to the private `SOAPeople/team-workspace` repo** | it's the app's source — ask the AI Architect for an invitation |
 | Windows 10/11 or macOS 11+ | the two supported desktops |
+
+The bootstrap installs the software prerequisites for you — you no longer install Node.js by
+hand. For reference, these are the tools it verifies and, where possible, installs automatically:
+
+| Software | Role | Handled by |
+|---|---|---|
+| Node.js LTS (≥ 18) + npm | runs the installer, the app runtime and the embedded servers | auto (winget `OpenJS.NodeJS.LTS` / Homebrew / apt-dnf); else nodejs.org |
+| Git | npm needs it to fetch the installer, and to clone the workspace repo | auto (winget `Git.Git` / `xcode-select --install` / apt-dnf); else git-scm.com |
+| Claude CLI | plugin preflight + the in-app terminals | best-effort auto; the app guides you later if still missing |
+| Electron runtime | the desktop app itself | auto-downloaded once by the installer (~120 MB) |
+| node-pty | the interactive terminals | ships **prebuilt** — no compiler ever needed |
 
 No compiler, no Visual Studio Build Tools, no Xcode, no front-end toolchain: the only native
 module (`node-pty`) ships prebuilt binaries for `win32-x64`, `win32-arm64`, `darwin-x64` and
@@ -71,8 +94,9 @@ each one as it goes:
 
 | # | Step | Windows | macOS |
 |---|---|---|---|
-| 1 | **Check Node** | refuses to continue below Node 18 | same |
-| 2 | **git** | installed silently via `winget install Git.Git` if missing (a Windows confirmation may appear) | guidance if missing (`xcode-select --install`) |
+| 0 | **Bootstrap** (git-free entry) | `bootstrap.ps1` installs Node.js LTS + Git via `winget` if either is missing, then calls the installer | `bootstrap.sh` verifies Node + Git (installs via Homebrew/apt where it safely can), then calls the installer |
+| 1 | **Check Node + npm** | refuses to continue below Node 18; verifies npm | same |
+| 2 | **git** | installed silently via `winget install Git.Git` if missing (a Windows confirmation may appear); PATH refreshed from the registry so the new binary is seen immediately | guidance if missing (`xcode-select --install`) |
 | 3 | **Claude CLI** | official installer (`irm https://claude.ai/install.ps1`), `npm -g` fallback; *best-effort* — the app guides you later if still missing | official installer (`curl https://claude.ai/install.sh`), same fallback |
 | 4 | **GitHub sign-in + checkout** | `git clone` of the private repo into `~/SOAPeople/team-workspace` — Git Credential Manager (ships with Git for Windows) opens the browser sign-in; `gh` CLI as fallback. Already cloned? `git pull --ff-only` instead. | same; the `gh` CLI device flow is the smoothest sign-in |
 | 5 | **Install the app** | hands over to `control/install.mjs` inside the checkout: installs the app dependencies (Electron + the embedded server's `express` and `node-pty`), uses the **prebuilt** UI shipped in the checkout (no Angular build on your machine), stages a launcher in `%LOCALAPPDATA%\TW Control`, puts a shortcut on the desktop, launches | same, staged as a real `TW Control.app` bundle in `~/Applications` |
@@ -101,6 +125,9 @@ npx github:SOAPeople-JohanSottovia/tw-control-install [options]
 
 ## Troubleshooting
 
+- **`npm error syscall spawn git` / `spawn git ENOENT` / `errno -4058`** — Git is not installed,
+  so `npx github:…` cannot fetch the installer. Use the **bootstrap one-liner** at the top of this
+  page instead (`irm …bootstrap.ps1 | iex` on Windows) — it installs Git first, then continues.
 - **"could not clone …" / permission denied** — your GitHub account has no access to the
   private repo yet. Ask the AI Architect for an invitation, then re-run the command.
   Smoothest sign-in path: install the [GitHub CLI](https://cli.github.com), run
@@ -145,10 +172,15 @@ repository — edit there, then mirror to this public repo:
 ```sh
 # from the private repo root
 cp control/installer/package.json control/installer/README.md <mirror>/
+cp control/installer/bootstrap.ps1 control/installer/bootstrap.sh <mirror>/
 cp control/installer/bin/install.mjs <mirror>/bin/
 cp control/installer/assets/logo.png <mirror>/assets/
-cd <mirror> && git commit -am "sync installer" && git push
+cd <mirror> && git add -A && git commit -m "sync installer" && git push
 ```
+
+> The `bootstrap.ps1` / `bootstrap.sh` one-liners are fetched from the mirror over
+> `raw.githubusercontent.com`, so they only work once these files are pushed to the mirror's
+> `main`. Always sync them together with `bin/install.mjs`.
 
 Publishing to the npm registry later (for a `npx @soapeople/tw-control` short form) only
 requires the `soapeople` npm organisation and `npm publish` from this folder — the package

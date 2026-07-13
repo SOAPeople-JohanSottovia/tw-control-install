@@ -147,10 +147,35 @@ function prependPath(dir) {
   if (dir && fs.existsSync(dir)) process.env.PATH = dir + path.delimiter + (process.env.PATH || '');
 }
 
+// Windows: winget writes a tool's location into the REGISTRY PATH, which the running process
+// never inherits. Re-read Machine + User PATH from the registry so a just-installed tool (git)
+// becomes visible without us having to guess its install directory.
+function refreshWindowsPath() {
+  if (!isWin) return;
+  const read = (hive) => {
+    const r = spawnSync('reg', ['query', hive, '/v', 'Path'], { encoding: 'utf8' });
+    if (r.status !== 0) return '';
+    const m = (r.stdout || '').match(/Path\s+REG_(?:EXPAND_)?SZ\s+(.*)/i);
+    return m ? m[1].trim() : '';
+  };
+  const machine = read('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment');
+  const user = read('HKCU\\Environment');
+  const merged = [machine, user, process.env.PATH || ''].filter(Boolean).join(path.delimiter);
+  const expanded = merged.replace(/%([^%]+)%/g, (_, v) => process.env[v] || `%${v}%`);
+  if (expanded) process.env.PATH = expanded;
+}
+
 function ensureNode() {
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 18) fail(`Node ${process.versions.node} is too old. Install the LTS from https://nodejs.org (18 or newer), then re-run this command.`);
   log(`Node ${process.versions.node}: OK`);
+}
+
+// npm ships inside Node, but verify it explicitly so a broken PATH surfaces here with clear
+// guidance rather than as an opaque failure deep inside the app build.
+function ensureNpm() {
+  if (which('npm')) { log('npm: found'); return; }
+  fail('npm was not found next to Node. Reinstall Node.js LTS from https://nodejs.org (it bundles npm), then re-run this command.');
 }
 
 function ensureGit() {
@@ -159,10 +184,11 @@ function ensureGit() {
     step('Installing Git (one-time, via winget — a Windows confirmation may appear)');
     if (!which('winget')) fail('git is missing and winget is unavailable.\n  Install Git from https://git-scm.com/download/win then re-run this command.');
     spawnSync('winget', ['install', '--id', 'Git.Git', '-e', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements', '--silent'], { stdio: 'inherit' });
+    refreshWindowsPath(); // pick up git from the registry PATH winget just wrote
     for (const root of [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs')].filter(Boolean)) {
       prependPath(path.join(root, 'Git', 'cmd'));
     }
-    if (which('git')) return;
+    if (which('git')) { log('git: installed'); return; }
     fail('Git installation did not complete.\n  Install it from https://git-scm.com/download/win then re-run this command.');
   }
   if (isMac) fail('git is missing. Run `xcode-select --install` (or `brew install git`), then re-run this command.');
@@ -231,10 +257,20 @@ function rmrf(target) {
   catch (e) { log(`⚠ could not remove ${target}: ${e.message}`); return false; }
 }
 
+// Verify EVERY tool the whole pipeline relies on, up front, before anything is installed.
+// Auto-install what we can (git, Claude CLI); give a precise manual procedure for what we cannot;
+// note the tools handled downstream so the user sees the full picture in one place.
+function preflight() {
+  step('Checking prerequisites');
+  ensureNode();                 // node runtime (≥18)
+  ensureNpm();                  // npm (bundled with Node) — used for every dependency install
+  ensureGit();                  // git — auto via winget on Windows, guidance elsewhere
+  ensureClaude();               // Claude CLI — best-effort; the app guides the user if still absent
+  log('Electron runtime + node-pty: handled by the app installer (auto-downloaded / prebuilt — no compiler needed).');
+}
+
 function doInstallOrUpdate(a, fresh) {
-  ensureNode();
-  ensureGit();
-  ensureClaude();
+  preflight();
   cloneOrUpdate(a.repo, a.dir, a.branch);
   if (a.cloneOnly) { process.stdout.write(`\n✅ Checkout ready at ${a.dir} (clone-only mode).\n`); return; }
   runAppInstaller(a.dir, a.forward);
@@ -250,6 +286,7 @@ function doRepair(a, p, state) {
       `${state.dirty ? '  The checkout has local changes — commit/stash/discard them first.\n' : ''}` +
       `${state.branch !== BRANCH ? `  The checkout is on branch ${state.branch} — switch to ${BRANCH} first.\n` : ''}`);
   }
+  ensureNode(); ensureNpm(); // repair rebuilds node_modules — verify the toolchain first
   step('Repairing — removing binaries (settings & registered workspaces are kept)');
   for (const s of [p.stage, ...p.shortcuts]) if (fs.existsSync(s)) { log(`removing ${s}`); rmrf(s); }
   for (const nm of [
