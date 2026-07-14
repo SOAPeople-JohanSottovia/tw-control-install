@@ -55,7 +55,7 @@ shows what it found — including whether a **new version is available** — and
 |---|---|
 | **Update** *(default)* | pulls the latest version, refreshes the required tools, re-stages the app |
 | **Repair** | removes the binaries (staged app, `node_modules`) and reinstalls them — your **settings and registered workspaces are kept**. Only allowed when you are already on the latest version. |
-| **Uninstall** | removes the app, launcher, shortcut, checkout and settings. Your cloned **workspace repositories stay on disk** (they are listed so you can remove them yourself). Asks you to type `UNINSTALL`. |
+| **Uninstall** | removes the app, launcher, shortcut, checkout, settings **and the whole `TWControl` data folder** (workspaces, worktrees, presets, plugin studio). Your cloned **workspace repositories are listed one by one — the ones you choose to keep survive the sweep**. Asks you to type `UNINSTALL`. |
 
 Scripted equivalents: `--update`, `--repair`, `--uninstall` (with `--yes` to skip
 confirmations). Every path is idempotent — the script never breaks an existing installation.
@@ -111,7 +111,8 @@ npx github:SOAPeople-JohanSottovia/tw-control-install [options]
 
 --update         pull the latest version and re-stage the app (skips the menu)
 --repair         reinstall binaries, keep settings & registered workspaces (latest version only)
---uninstall      remove app + checkout + settings; cloned workspace repos stay on disk
+--uninstall      remove app + checkout + settings + the whole TWControl data folder; you pick
+                 which cloned workspace repos to keep — kept folders survive the sweep
 --yes | -y       non-interactive: skip menus and confirmations
 
 --dir <path>     where to clone the workspace repo   (default: ~/SOAPeople/team-workspace)
@@ -143,19 +144,22 @@ npx github:SOAPeople-JohanSottovia/tw-control-install [options]
 
 ## Uninstall
 
-The built-in flow does it for you (and lists the workspace repos it deliberately keeps):
+The built-in flow does it for you (and asks, folder by folder, which workspace repos to keep —
+everything else, including the whole `TWControl` data folder, is removed):
 
 ```sh
 npx github:SOAPeople-JohanSottovia/tw-control-install --uninstall
 ```
 
-Manual equivalent — delete three things (no registry entries, no services):
+Manual equivalent — delete five things (no registry entries, no services):
 
 | What | Windows | macOS |
 |---|---|---|
 | App launcher | `%LOCALAPPDATA%\TW Control` | `~/Applications/TW Control.app` |
 | Desktop shortcut | `Desktop\TW Control.lnk` | `Desktop/TW Control.app` |
-| Checkout (your choice) | `%USERPROFILE%\SOAPeople\team-workspace` | `~/SOAPeople/team-workspace` |
+| Settings | `%APPDATA%\TW Control` | `~/Library/Application Support/TW Control` |
+| Data folder (workspaces, worktrees, presets, plugin studio) | `%USERPROFILE%\TWControl` | `~/TWControl` |
+| Checkout | `%USERPROFILE%\SOAPeople\team-workspace` | `~/SOAPeople/team-workspace` |
 
 ## Security & privacy
 

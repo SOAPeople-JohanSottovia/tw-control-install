@@ -11,8 +11,10 @@
 //     · Update    — fast-forward the checkout + refresh tools, re-stage the app
 //     · Repair    — wipe binaries (staged app, node_modules) and reinstall; SETTINGS AND
 //                   REGISTERED WORKSPACES ARE KEPT (userData untouched). Latest version only.
-//     · Uninstall — remove the app, launcher, shortcut, checkout and userData (settings,
-//                   secrets, workspace registrations). Cloned workspace REPOS stay on disk.
+//     · Uninstall — remove the app, launcher, shortcut, checkout, userData (settings, secrets,
+//                   workspace registrations) AND the whole TWControl data folder (~/TWControl:
+//                   workspaces, worktrees, presets, plugin studio/forks). Only the cloned
+//                   workspace REPOS the user chooses to keep survive the sweep.
 //
 // The script is safe to re-run: every path is idempotent.
 //
@@ -132,7 +134,7 @@ async function chooseAction(state, yes) {
   process.stdout.write('\n');
   process.stdout.write(`  [1] Update     — ${state.updateAvailable ? 'install the new version' : 'reinstall the latest version'} (recommended)\n`);
   process.stdout.write(`  [2] Repair     — reinstall binaries, KEEP settings & registered workspaces${canRepair ? '' : '  (needs an up-to-date, clean checkout)'}\n`);
-  process.stdout.write('  [3] Uninstall  — remove the app, checkout and settings\n');
+  process.stdout.write('  [3] Uninstall  — remove the app, checkout, settings and the TWControl data folder\n');
   process.stdout.write('  [4] Quit\n');
   if (yes || !process.stdin.isTTY) { log('(non-interactive: Update)'); return 'update'; }
   const ans = await ask('\nChoice [1]: ');
@@ -329,6 +331,25 @@ function rmrf(target) {
   catch (e) { log(`⚠ could not remove ${target}: ${e.message}`); return false; }
 }
 
+// True when child IS parent or lives anywhere below it (both already resolved).
+function isUnder(child, parent) {
+  const rel = path.relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+// Remove dir and everything below it EXCEPT the paths in keep — those folders survive untouched,
+// and so do their ancestors (needed as scaffolding). Returns true when dir itself ended up removed.
+function sweep(dir, keep) {
+  const d = path.resolve(dir);
+  if (keep.some((k) => isUnder(d, k))) return false;      // inside a kept folder — untouched
+  if (!keep.some((k) => isUnder(k, d))) return rmrf(d);   // nothing kept below — whole subtree goes
+  let entries;
+  try { entries = fs.readdirSync(d); } catch (e) { log(`⚠ could not read ${d}: ${e.message}`); return false; }
+  let removedAll = true;
+  for (const e of entries) removedAll = sweep(path.join(d, e), keep) && removedAll;
+  return removedAll ? rmrf(d) : false;
+}
+
 // Verify EVERY tool the whole pipeline relies on, up front, before anything is installed.
 // Auto-install what we can (git, Claude CLI); give a precise manual procedure for what we cannot;
 // note the tools handled downstream so the user sees the full picture in one place.
@@ -384,6 +405,20 @@ async function doUninstall(a, p, yes) {
     checkouts.push(DEFAULT_DIR);
     log(`checkout:   ${DEFAULT_DIR}  (default location — older install)`);
   }
+  // The app's own data folder goes away too — ENTIRELY. ~/TWControl is where the app puts
+  // everything it creates on disk (workspaces/, worktrees/, presets/, plugin-studio/,
+  // plugin-forks/ …). Roots relocated through config.json are swept the same way. The ONLY
+  // survivors are the workspace folders the user chooses to KEEP below — the sweep walks
+  // around them (and their parent folders) and deletes everything else.
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(path.join(p.userData, 'config.json'), 'utf8')); } catch { /* no config */ }
+  const twBase = path.resolve(HOME, 'TWControl');
+  const dataRoots = [...new Set([twBase,
+    ...['workspacesRoot', 'worktreesRoot', 'presetsRoot', 'studioRoot', 'forksRoot']
+      .map((k) => cfg[k]).filter((v) => typeof v === 'string' && v)
+      .map((v) => path.resolve(v)).filter((v) => !isUnder(v, twBase)),
+  ])].filter((r) => fs.existsSync(r));
+  for (const r of dataRoots) log(`app data:   ${r}  (workspaces, worktrees, presets, plugin studio — kept workspace folders survive)`);
   // The registry knows the cloned workspace repos — they are the user's WORK. registry.json stores
   // { repos: { "owner/repo": { localPath, trees: { main: { path } } } } } — BOTH repos and trees are
   // OBJECTS, so enumerate with Object.values (a for..of over an object throws → the list would silently
@@ -444,6 +479,14 @@ async function doUninstall(a, p, yes) {
     log(`removing ${t}`);
     okAll = rmrf(t) && okAll;
   }
+  // Sweep the TWControl data folder(s) last: everything goes except the kept workspace folders.
+  const keptPaths = wsList.filter((w) => !toDelete.includes(w)).map((w) => path.resolve(w));
+  for (const r of dataRoots) {
+    if (!fs.existsSync(r)) continue;
+    const guarded = keptPaths.some((k) => isUnder(k, r));
+    log(`removing ${r}${guarded ? ' (kept workspace folders stay)' : ''}`);
+    okAll = (sweep(r, keptPaths) || guarded) && okAll;
+  }
   if (!okAll && isWin) log('⚠ some files were locked — close TW Control and re-run uninstall.');
   process.stdout.write(okAll
     ? `\n✅ TW Control was uninstalled${wsList.length ? ` (${toDelete.length}/${wsList.length} workspace folder(s) removed)` : ''}.\n`
@@ -458,8 +501,9 @@ async function main() {
       '  (no flag)       detect: fresh machine → install; existing → interactive menu\n' +
       '  --update        pull the latest version and re-stage the app\n' +
       '  --repair        reinstall binaries, keep settings & registered workspaces (latest version only)\n' +
-      '  --uninstall     remove app + checkout + settings; asks to type UNINSTALL. You then pick WHICH\n' +
-      '                  registered workspace folders to delete (numbers, ALL, or Enter to keep them)\n' +
+      '  --uninstall     remove app + checkout + settings + the whole TWControl data folder; asks to\n' +
+      '                  type UNINSTALL. You then pick WHICH registered workspace folders to delete\n' +
+      '                  (numbers, ALL, or Enter to keep them) — kept folders survive the sweep\n' +
       '  --purge-workspaces  on uninstall, delete ALL the workspace folders (destroys local work)\n' +
       '  --keep-workspaces   on uninstall, keep every workspace folder without asking\n' +
       '  --yes | -y      skip confirmations / menus (non-interactive). On uninstall this DELETES ALL the\n' +
