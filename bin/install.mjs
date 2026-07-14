@@ -327,7 +327,12 @@ function runAppInstaller(dir, forward) {
 
 // ── lifecycle actions ───────────────────────────────────────────────────────────────────────────
 function rmrf(target) {
-  try { fs.rmSync(target, { recursive: true, force: true }); return true; }
+  // maxRetries/retryDelay is fs.rmSync's built-in backoff for TRANSIENT failures — EBUSY, EPERM,
+  // ENOTEMPTY, EMFILE, ENFILE. It matters here: TW Control auto-starts the workspaces, so its
+  // servers/git/node-pty (and the OS indexer) may still be WRITING into ~/TWControl while uninstall
+  // runs — files reappear faster than a single-shot rmSync deletes them → ENOTEMPTY. Retrying rides
+  // out those races; a truly still-running app is handled by the "quit and re-run" hint below.
+  try { fs.rmSync(target, { recursive: true, force: true, maxRetries: 12, retryDelay: 200 }); return true; }
   catch (e) { log(`⚠ could not remove ${target}: ${e.message}`); return false; }
 }
 
@@ -487,10 +492,14 @@ async function doUninstall(a, p, yes) {
     log(`removing ${r}${guarded ? ' (kept workspace folders stay)' : ''}`);
     okAll = (sweep(r, keptPaths) || guarded) && okAll;
   }
-  if (!okAll && isWin) log('⚠ some files were locked — close TW Control and re-run uninstall.');
+  // Removal failed on some path (typically because TW Control is STILL RUNNING and its auto-started
+  // workspace servers keep the files busy / recreate them). The retry above rides out brief races;
+  // a live app needs the user to quit it. Re-running the uninstall then finishes cleanly (idempotent).
+  if (!okAll) log('⚠ some files could not be removed — QUIT TW Control (and close any terminals or '
+    + 'editors open inside these folders), then re-run the uninstall to finish. It is safe to re-run.');
   process.stdout.write(okAll
     ? `\n✅ TW Control was uninstalled${wsList.length ? ` (${toDelete.length}/${wsList.length} workspace folder(s) removed)` : ''}.\n`
-    : '\n⚠ Uninstall finished with warnings (see above).\n');
+    : '\n⚠ Uninstall finished with warnings — re-run it after quitting TW Control to remove what is left.\n');
 }
 
 // ── entry ───────────────────────────────────────────────────────────────────────────────────────
