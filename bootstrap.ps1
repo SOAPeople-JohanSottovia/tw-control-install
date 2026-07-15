@@ -36,6 +36,15 @@ function Refresh-Path($extra) {
 Write-Host "`n== TW Control - guided install =="
 Note 'Verifying prerequisites (Node.js, git) and installing whatever is missing.'
 
+# Elevation check — an ADMIN PowerShell is not needed (winget prompts by itself when it must) and it
+# is actively harmful downstream: anything the app creates while elevated (workspace clones, .claude
+# settings) becomes Administrators-owned — unreadable and undeletable in normal sessions. The
+# installer de-elevates the app launch itself; this note explains the situation up front.
+$twIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if ((New-Object Security.Principal.WindowsPrincipal($twIdentity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  Note 'Administrator PowerShell detected - not required. TW Control itself will be started WITHOUT elevation.'
+}
+
 $haveWinget = Have 'winget'
 
 # 1) Node.js — provides node + npm + npx (the engine for everything that follows). The installer
