@@ -55,7 +55,7 @@ shows what it found — including whether a **new version is available** — and
 |---|---|
 | **Update** *(default)* | pulls the latest version, refreshes the required tools, re-stages the app |
 | **Repair** | removes the binaries (staged app, `node_modules`) and reinstalls them — your **settings and registered workspaces are kept**. Only allowed when you are already on the latest version. |
-| **Uninstall** | removes the app, launcher, shortcut, checkout, settings **and the whole `TWControl` data folder** (workspaces, worktrees, presets, plugin studio). Your cloned **workspace repositories are listed one by one — the ones you choose to keep survive the sweep**. Asks you to type `UNINSTALL`. |
+| **Uninstall** | removes the app, launcher, shortcut, checkout, settings **and the whole `TWControl` data folder** (workspaces, worktrees, presets, plugin studio). Your cloned **workspace repositories are listed one by one — the ones you choose to keep survive the sweep**. The **Claude Code plugin** (`team-workspace@ip-team`) and its `ip-team` marketplace are removed too (`--keep-plugin` skips that). Asks you to type `UNINSTALL`. |
 
 Scripted equivalents: `--update`, `--repair`, `--uninstall` (with `--yes` to skip
 confirmations). Every path is idempotent — the script never breaks an existing installation.
@@ -111,8 +111,11 @@ npx github:SOAPeople-JohanSottovia/tw-control-install [options]
 
 --update         pull the latest version and re-stage the app (skips the menu)
 --repair         reinstall binaries, keep settings & registered workspaces (latest version only)
---uninstall      remove app + checkout + settings + the whole TWControl data folder; you pick
-                 which cloned workspace repos to keep — kept folders survive the sweep
+--uninstall      remove app + checkout + settings + the whole TWControl data folder + the Claude
+                 Code plugin; you pick which cloned workspace repos to keep — kept folders survive
+--delete-workspace <path>  with --uninstall: delete exactly this workspace folder (repeatable;
+                 unlisted folders are kept — this is what the console About panel sends)
+--keep-plugin    with --uninstall: leave the Claude Code plugin + ip-team marketplace installed
 --yes | -y       non-interactive: skip menus and confirmations
 
 --dir <path>     where to clone the workspace repo   (default: ~/SOAPeople/team-workspace)
@@ -145,7 +148,8 @@ npx github:SOAPeople-JohanSottovia/tw-control-install [options]
 ## Uninstall
 
 The built-in flow does it for you (and asks, folder by folder, which workspace repos to keep —
-everything else, including the whole `TWControl` data folder, is removed):
+everything else, including the whole `TWControl` data folder and the Claude Code plugin +
+`ip-team` marketplace, is removed):
 
 ```sh
 npx github:SOAPeople-JohanSottovia/tw-control-install --uninstall

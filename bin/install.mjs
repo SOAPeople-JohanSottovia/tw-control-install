@@ -33,6 +33,11 @@ const HOME = os.homedir();
 
 const DEFAULT_REPO = 'https://github.com/SOAPeople/team-workspace.git';
 const DEFAULT_DIR = path.join(HOME, 'SOAPeople', 'team-workspace');
+
+// What control/main/plugin-install.js sets up on every machine — removed again at uninstall
+// (unless --keep-plugin). Kept in sync with that module's MARKETPLACE/PLUGIN_ID constants.
+const CLAUDE_MARKETPLACE = 'ip-team';
+const CLAUDE_PLUGIN = `team-workspace@${CLAUDE_MARKETPLACE}`;
 const BRANCH = 'main';
 
 const log = (m) => process.stdout.write(`  ${m}\n`);
@@ -53,6 +58,8 @@ function parseArgs(argv) {
     else if (x === '--yes' || x === '-y') a.yes = true;
     else if (x === '--purge-workspaces') a.purgeWorkspaces = true;
     else if (x === '--keep-workspaces') a.keepWorkspaces = true;
+    else if (x === '--delete-workspace') (a.deleteWs = a.deleteWs || []).push(path.resolve(argv[++i]));
+    else if (x === '--keep-plugin') a.keepPlugin = true;
     else if (x === '--no-shortcut' || x === '--no-launch') a.forward.push(x);
     else if (x === '--path') a.forward.push(x, argv[++i]); // app staging dir, handled by control/install.mjs
     else if (x === '--help' || x === '-h') a.help = true;
@@ -255,6 +262,27 @@ function claudeSemver() {
   const r = shellSync('claude', ['--version'], { encoding: 'utf8' });
   return r.status === 0 ? parseSemver(r.stdout) : null;
 }
+// PRESENT ≠ RUNNABLE, and this is not hypothetical: the npm package is a thin wrapper whose platform-native
+// binary arrives via postinstall / an optional dependency. Skip either (--ignore-scripts, --omit=optional,
+// a proxy that blocks the download) and `bin/claude.exe` stays a shebang-less error stub — which `which`
+// happily reports as "installed" while every spawn downstream dies with `spawn ENOEXEC`. Worse, that stub
+// sits on PATH ahead of a healthy native install and shadows it. So every claude check here goes through
+// `claude --version`, never through mere existence.
+const claudeRuns = () => claudeSemver() !== null;
+
+// The npm wrapper's own postinstall can be re-run — cheaper and far less confusing than telling the user to
+// reinstall. Best-effort: ask npm where its global root is (the prefix is not always ~/.npm-global).
+function repairNpmClaude() {
+  const r = shellSync('npm', ['root', '-g'], { encoding: 'utf8' });
+  const root = r.status === 0 ? String(r.stdout || '').trim().split(/\r?\n/).pop() : null;
+  if (!root) return false;
+  const script = path.join(root, '@anthropic-ai', 'claude-code', 'install.cjs');
+  if (!fs.existsSync(script)) return false;
+  log('the npm install left no native binary — re-running its postinstall…');
+  shellSync('node', [script], { stdio: 'inherit' });
+  return claudeRuns();
+}
+
 function installClaude() {
   step('Installing the Claude CLI');
   try {
@@ -262,16 +290,20 @@ function installClaude() {
     else spawnSync('bash', ['-c', 'curl -fsSL https://claude.ai/install.sh | bash'], { stdio: 'inherit' });
   } catch { /* fall through to npm */ }
   prependPath(path.join(HOME, '.local', 'bin')); // where the official installer puts it
-  if (which('claude')) return;
+  if (claudeRuns()) return;
   log('official installer unavailable — falling back to npm…');
   shellSync('npm', ['install', '-g', '@anthropic-ai/claude-code'], { stdio: 'inherit' });
   prependPath(path.join(HOME, '.npm-global', 'bin'));
+  if (!claudeRuns()) repairNpmClaude();
 }
 function ensureClaude() {
-  if (!which('claude')) {
+  if (!claudeRuns()) {
     installClaude();
-    if (!which('claude')) {
-      log('⚠ claude CLI still missing — TW Control needs it for Plugin Studio, ticket sync and the second brain, and will guide you when it does.');
+    if (!claudeRuns()) {
+      const stub = which('claude');
+      log(stub
+        ? `⚠ claude CLI at ${stub} is present but cannot run (its native binary was never downloaded) — remove it (\`npm uninstall -g @anthropic-ai/claude-code\`) and re-run this installer; TW Control needs the CLI for Plugin Studio, ticket sync and the second brain.`
+        : '⚠ claude CLI still missing — TW Control needs it for Plugin Studio, ticket sync and the second brain, and will guide you when it does.');
       return;
     }
   }
@@ -279,10 +311,13 @@ function ensureClaude() {
   if (!v) { log('claude CLI: found (version unreadable)'); return; }
   if (cmpSemver(v, MIN_CLAUDE) < 0) {
     step(`claude CLI ${v.join('.')} is older than the required ${MIN_CLAUDE.join('.')} — updating to the latest`);
-    shellSync('npm', ['install', '-g', '@anthropic-ai/claude-code@latest'], { stdio: 'inherit' });
-    prependPath(path.join(HOME, '.npm-global', 'bin'));
+    // Re-run the OFFICIAL installer first (it self-updates in place); npm is only the fallback, exactly as
+    // for a first install. Going straight to npm here is what plants a stub next to a working native CLI.
+    installClaude();
     const v2 = claudeSemver();
-    log(v2 ? `claude CLI: ${v2.join('.')}` : '⚠ claude update did not complete — TW Control will guide you when it needs it.');
+    log(v2 && cmpSemver(v2, MIN_CLAUDE) >= 0
+      ? `claude CLI: ${v2.join('.')}`
+      : `⚠ claude update did not complete (still ${v2 ? v2.join('.') : 'unreadable'}) — TW Control will guide you when it needs it.`);
   } else {
     log(`claude CLI ${v.join('.')}: OK`);
   }
@@ -396,11 +431,38 @@ function doRepair(a, p, state) {
   process.stdout.write('\n✅ Repair complete — settings and registered workspaces were preserved.\n');
 }
 
+// Remove what plugin-install.js set up on this machine: the project-scope install in every
+// SURVIVING workspace folder (deleted folders take theirs to the grave), the user-scope install,
+// then the ip-team marketplace registration and its cached clone in ~/.claude. The claude CLI
+// exits 0 even on failure (verified live) — outputs are echoed for the user, never trusted as a
+// gate; every step is best-effort so plugin debris can never block the file sweep.
+function removeClaudePlugin(keptWorkspaces) {
+  step('Removing the Claude Code plugin');
+  if (!which('claude')) {
+    log(`claude CLI not found — skipped. Remove it later with: claude plugin uninstall ${CLAUDE_PLUGIN} && claude plugin marketplace remove ${CLAUDE_MARKETPLACE}`);
+    return;
+  }
+  const run = (args, cwd) => {
+    try {
+      const r = shellSync('claude', args, { cwd, encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
+      const line = `${r.stdout || ''}\n${r.stderr || ''}`.trim().split('\n').filter(Boolean).pop();
+      return line || 'done';
+    } catch (e) { return `skipped (${e.message})`; }
+  };
+  for (const w of keptWorkspaces) {
+    if (!fs.existsSync(path.join(w, '.claude', 'settings.json'))) continue;
+    log(`kept workspace ${w}: ${run(['plugin', 'uninstall', CLAUDE_PLUGIN, '--scope', 'project'], w)}`);
+  }
+  log(`user scope: ${run(['plugin', 'uninstall', CLAUDE_PLUGIN])}`);
+  log(`marketplace ${CLAUDE_MARKETPLACE}: ${run(['plugin', 'marketplace', 'remove', CLAUDE_MARKETPLACE])}`);
+}
+
 async function doUninstall(a, p, yes) {
   step('Uninstall — this removes:');
   log(`app:        ${p.stage}`);
   for (const s of p.shortcuts) log(`shortcut:   ${s}`);
   log(`settings:   ${p.userData}  (config, secrets, workspace registrations)`);
+  if (!a || !a.keepPlugin) log(`plugin:     Claude Code plugin ${CLAUDE_PLUGIN} + marketplace ${CLAUDE_MARKETPLACE} (via the claude CLI)`);
   log(`checkout:   ${p.checkout}`);
   // The DEFAULT checkout location can hold an older install when the app was later (re)installed with a
   // custom --dir — sweep it too (Windows and macOS alike) instead of leaving a stray
@@ -443,12 +505,19 @@ async function doUninstall(a, p, yes) {
   // Decide the fate of the cloned workspace repos — folder by folder, not all-or-nothing:
   //   --keep-workspaces   keep every folder, no question
   //   --purge-workspaces  delete every folder, no question
+  //   --delete-workspace  delete exactly these folders, keep the rest (repeatable; the About panel sends these)
   //   --yes               fully unattended = delete them ALL (no selection round — by design)
   //   interactive         numbered selection: pick some (e.g. "1,3"), ALL, or Enter to keep everything
   let toDelete = [];
   if (wsList.length) {
     if (a && a.keepWorkspaces) toDelete = [];
     else if (a && a.purgeWorkspaces) toDelete = wsList;
+    else if (a && a.deleteWs && a.deleteWs.length) {
+      // Picks made in the console's About panel arrive as --delete-workspace flags. Intersect with
+      // the REGISTRY list so a stray or mistyped path can never widen the sweep beyond workspaces.
+      const picked = new Set(a.deleteWs.map((w) => path.resolve(w)));
+      toDelete = wsList.filter((w) => picked.has(path.resolve(w)));
+    }
     else if (yes) toDelete = wsList;
     else if (process.stdin.isTTY) {
       process.stdout.write('\n  Registered workspace repositories found:\n');
@@ -476,6 +545,10 @@ async function doUninstall(a, p, yes) {
     const ans = await ask('\nType UNINSTALL to confirm: ');
     if (ans !== 'UNINSTALL') { log('aborted — nothing was removed.'); return; }
   }
+
+  // The Claude Code plugin rides along — after the human gate, before the sweep (the kept
+  // workspace folders must still exist for their project-scope uninstall to run in them).
+  if (!a || !a.keepPlugin) removeClaudePlugin(wsList.filter((w) => !toDelete.includes(w)));
   step('Removing');
   let okAll = true;
   const targets = [p.stage, ...p.shortcuts, p.userData, ...checkouts, ...toDelete];
@@ -512,9 +585,13 @@ async function main() {
       '  --repair        reinstall binaries, keep settings & registered workspaces (latest version only)\n' +
       '  --uninstall     remove app + checkout + settings + the whole TWControl data folder; asks to\n' +
       '                  type UNINSTALL. You then pick WHICH registered workspace folders to delete\n' +
-      '                  (numbers, ALL, or Enter to keep them) — kept folders survive the sweep\n' +
+      '                  (numbers, ALL, or Enter to keep them) — kept folders survive the sweep.\n' +
+      '                  The Claude Code plugin + ip-team marketplace are removed too (--keep-plugin skips)\n' +
       '  --purge-workspaces  on uninstall, delete ALL the workspace folders (destroys local work)\n' +
       '  --keep-workspaces   on uninstall, keep every workspace folder without asking\n' +
+      '  --delete-workspace <path>  on uninstall, delete exactly this workspace folder (repeatable;\n' +
+      '                  unlisted folders are kept — this is what the console About panel sends)\n' +
+      '  --keep-plugin   on uninstall, leave the Claude Code plugin + ip-team marketplace installed\n' +
       '  --yes | -y      skip confirmations / menus (non-interactive). On uninstall this DELETES ALL the\n' +
       '                  registered workspace folders too — pass --keep-workspaces to keep them\n' +
       'install options:\n' +
