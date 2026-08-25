@@ -169,10 +169,10 @@ function prependPath(dir) {
 }
 
 // Windows: winget writes a tool's location into the REGISTRY PATH, which the running process
-// never inherits. Re-read Machine + User PATH from the registry so a just-installed tool (git)
-// becomes visible without us having to guess its install directory.
-function refreshWindowsPath() {
-  if (!isWin) return;
+// never inherits. The registry Machine + User Path is also what a FRESHLY LAUNCHED GUI app gets —
+// i.e. the PATH TW Control itself will see, unlike this shell's session PATH (see the launch check).
+function windowsRegistryPath() {
+  if (!isWin) return '';
   const read = (hive) => {
     const r = spawnSync('reg', ['query', hive, '/v', 'Path'], { encoding: 'utf8' });
     if (r.status !== 0) return '';
@@ -181,9 +181,15 @@ function refreshWindowsPath() {
   };
   const machine = read('HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment');
   const user = read('HKCU\\Environment');
-  const merged = [machine, user, process.env.PATH || ''].filter(Boolean).join(path.delimiter);
-  const expanded = merged.replace(/%([^%]+)%/g, (_, v) => process.env[v] || `%${v}%`);
-  if (expanded) process.env.PATH = expanded;
+  const merged = [machine, user].filter(Boolean).join(path.delimiter);
+  return merged.replace(/%([^%]+)%/g, (_, v) => process.env[v] || `%${v}%`);
+}
+// Re-read the registry PATH into this process so a just-installed tool (git) becomes visible
+// without us having to guess its install directory.
+function refreshWindowsPath() {
+  if (!isWin) return;
+  const merged = [windowsRegistryPath(), process.env.PATH || ''].filter(Boolean).join(path.delimiter);
+  if (merged) process.env.PATH = merged;
 }
 
 // Zero-dep semver: "1.2.3" → [1,2,3]; compare two triples.
@@ -323,6 +329,52 @@ function ensureClaude() {
   }
 }
 
+// THIS shell finding `claude` is NOT the same as TW CONTROL finding it: the app is GUI-launched (no
+// shell, minimal PATH) and its terminal sessions spawn through node-pty/ConPTY, whose PATH walk
+// matches the literal file name — it never appends .exe the way cmd (PATHEXT) does. A machine can
+// therefore pass `claude --version` above and still end its very first AI search with "could not
+// launch the assistant: File not found:". Reproduce the APP's own resolution now, at install time:
+// the well-known install dirs crossed with the platform names (exactly control/main/plugin-install.js
+// resolveClaudeBin), then the PATH a freshly launched GUI app will actually see — on Windows the
+// REGISTRY Machine+User Path, NOT this shell's session PATH (which prependPath already widened).
+function verifyAppCanLaunchClaude() {
+  const names = isWin ? ['claude.exe', 'claude.cmd', 'claude'] : ['claude'];
+  const wellKnown = [
+    path.join(HOME, '.local', 'bin'),
+    path.join(HOME, '.claude', 'local'),
+    path.join(HOME, '.npm-global', 'bin'),
+    '/usr/local/bin', '/opt/homebrew/bin',
+  ];
+  const guiPath = isWin ? windowsRegistryPath() : (process.env.PATH || '');
+  const dirs = [...wellKnown, ...guiPath.split(path.delimiter)].filter(Boolean);
+  // PRESENT ≠ RUNNABLE here too: an npm claude.exe whose postinstall never ran is a shebang-less text
+  // stub — require a real program header (PE/shebang; any header passes on Unix, where the native
+  // binary is Mach-O/ELF), and accept .cmd shims as-is (they run through cmd.exe).
+  const runnable = (p) => {
+    if (isWin && /\.(cmd|bat)$/i.test(p)) return true;
+    if (!isWin) { try { fs.accessSync(p, fs.constants.X_OK); } catch { return false; } }
+    try {
+      const fd = fs.openSync(p, 'r'); const b = Buffer.alloc(2);
+      const n = fs.readSync(fd, b, 0, 2, 0); fs.closeSync(fd);
+      if (n < 2) return false;
+      return isWin ? (b[0] === 0x4d && b[1] === 0x5a) || (b[0] === 0x23 && b[1] === 0x21) : true;
+    } catch { return false; }
+  };
+  let found = null;
+  outer: for (const d of dirs) for (const nm of names) {
+    const p = path.join(d, nm);
+    try { if (fs.existsSync(p) && runnable(p)) { found = p; break outer; } } catch { /* next */ }
+  }
+  if (found && !/\.(cmd|bat)$/i.test(found)) { log(`assistant launch check: OK — TW Control will start ${found}`); return; }
+  if (found) {
+    log(`assistant launch check: OK — via the npm shim ${found} (the official installer at https://claude.ai/install is the recommended self-updating channel).`);
+    return;
+  }
+  log(isWin
+    ? '⚠ assistant launch check FAILED: no claude.exe is visible to a freshly started app (well-known dirs + registry PATH). The second brain and the terminal tabs will show "could not launch the assistant". Fix: install with the official installer (https://claude.ai/install), then sign out and back in (or reboot) before starting TW Control.'
+    : '⚠ assistant launch check FAILED: no runnable claude was found in the app\'s well-known locations or on PATH. The second brain and the terminal tabs will show "could not launch the assistant". Fix: install it with the official installer (https://claude.ai/install), then restart TW Control.');
+}
+
 function cloneOrUpdate(repo, dir, branch) {
   if (fs.existsSync(path.join(dir, '.git'))) {
     step(`Updating the existing checkout at ${dir}`);
@@ -399,6 +451,7 @@ function preflight() {
   ensureNpm();                  // npm (bundled with Node) — bumped if stale; Angular 22 needs a modern npm
   ensureGit();                  // git — auto via winget on Windows, guidance elsewhere
   ensureClaude();               // Claude CLI — best-effort; the app guides the user if still absent
+  verifyAppCanLaunchClaude();   // …and verify the APP will find it too (GUI PATH + node-pty semantics), not just this shell
   log('Electron runtime + node-pty: handled by the app installer (auto-downloaded / prebuilt — no compiler needed).');
 }
 
